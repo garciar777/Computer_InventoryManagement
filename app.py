@@ -143,7 +143,7 @@ def init_db():
 init_db()
 
 # --- CREATE DEFAULT ADMIN ---
-def create_admin(username="admin", password="admin123"):
+def create_admin(username="ICTO", password="ICTOadmin123"):
 
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", (username, password))
@@ -251,7 +251,7 @@ def register_admin():
         secret_code = request.form["secret_code"].strip()
 
         # ✅ SECURITY CHECK
-        ADMIN_SECRET = "SuperSecureAdminKey2025"  # Change this to something private!
+        ADMIN_SECRET = "ICTOAdminKey2025"  # Change this to something private!
 
         if secret_code != ADMIN_SECRET:
             flash("❌ Invalid admin secret code. Access denied.")

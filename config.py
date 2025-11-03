@@ -1,1 +1,1 @@
-NGROK_URL = "https://unhushable-natalya-ungaraged.ngrok-free.dev"
+NGROK_URL = "https://computer-inventorymanagement-2.onrender.com/"
