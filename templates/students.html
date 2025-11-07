@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Student Management</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" integrity="sha512-9usAa10IRO0HhonpyAIVpjrylPvoDwiPUiKdWk5t3PyolY1cOd4DSE0Ga+ri4AuTroPR5aQvXU9xC6qOPnzFeg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <title>User Management</title>
 
   <style>
     body {
@@ -119,6 +120,7 @@
       justify-content: center;
       align-items: center;
       gap: 10px;
+      flex-wrap: wrap;
     }
     .filter-input, .filter-select {
       padding: 8px 12px;
@@ -126,7 +128,7 @@
       border: 1px solid #ccc;
       font-size: 14px;
     }
-    .filter-input { width: 250px; }
+    .filter-input { width: 200px; }
 
     /* Modal */
     .modal {
@@ -181,17 +183,28 @@
 <body>
 
 <header>
-  <h2>👨‍🎓 Student Management</h2>
+  <h2><i class="fas fa-user" style="font-size: 36px;"></i>  USER MANAGEMENT</h2>
 </header>
 
 <div class="filter-bar">
-  <input type="text" id="idFilter" class="filter-input" placeholder="🔍 Search by ID Number..." onkeyup="filterTable()">
+  <input type="text" id="idFilter" class="filter-input" placeholder="🔍 Search by ID..." onkeyup="filterTable()">
   <input type="text" id="gradeFilter" class="filter-input" placeholder="🔍 Search by Grade & Section..." onkeyup="filterTable()">
+  <select id="userTypeFilter" class="filter-select" onchange="filterTable()">
+    <option value="all">All Users</option>
+    <option value="student">Students</option>
+    <option value="teacher">Teachers</option>
+  </select>
   <select id="anomalyFilter" class="filter-select" onchange="filterTable()">
-    <option value="all">All Students</option>
+    <option value="all">All</option>
     <option value="with">With Anomalies</option>
     <option value="without">Without Anomalies</option>
   </select>
+
+  <form method="post" action="{{ url_for('delete_allstudent') }}" style="display:inline;">
+    <button type="submit" class="action-btn success" onclick="return confirm('Are you sure you want to remove all users?');">
+      Remove All Users
+    </button>
+  </form>
 </div>
 
 <table id="studentTable">
@@ -202,13 +215,14 @@
       <th onclick="sortTable(2)">Grade & Section</th>
       <th>Password</th>
       <th onclick="sortTable(4)">Number of Anomalies</th>
+      <th onclick="sortTable(5)">Remarks</th>
       <th>Change Password</th>
-        <th>Action</th>
+      <th>Action</th>
     </tr>
   </thead>
   <tbody>
     {% for s in students %}
-    <tr data-hasanomaly="{{ 'true' if s.has_anomaly else 'false' }}">
+    <tr data-hasanomaly="{{ 'true' if s.has_anomaly else 'false' }}" data-usertype="{{ s.remarks.lower() }}">
       <td>{{ s.student_id }}</td>
       <td>{{ s.student_name }}</td>
       <td>{{ s.grade_section }}</td>
@@ -228,17 +242,18 @@
           <span class="status-none">0</span>
         {% endif %}
       </td>
+      <td>{{ s.remarks }}</td>
       <td>
         <form action="/students/{{ s.student_id }}/change_password" method="post" style="display:inline;">
           <input type="text" name="new_password" placeholder="New password" required style="width:120px;">
           <button type="submit" class="action-btn">Change</button>
         </form>
       </td>
-        <td>
-            <form action="/delete_student/{{ s.student_id }}" method="post" style="display:inline;">
-          <button type="submit" class="action-btn success">Remove Student</button>
+      <td>
+        <form action="/delete_student/{{ s.student_id }}" method="post" style="display:inline;">
+          <button type="submit" class="action-btn success">Remove User</button>
         </form>
-        </td>
+      </td>
     </tr>
     {% endfor %}
   </tbody>
@@ -282,7 +297,6 @@ function togglePassword(id) {
   setTimeout(() => input.type = "password", 3000);
 }
 
-// Sorting
 function sortTable(colIndex) {
   const table = document.getElementById("studentTable");
   const tbody = table.tBodies[0];
@@ -308,22 +322,26 @@ function sortTable(colIndex) {
   rows.forEach(r => tbody.appendChild(r));
 }
 
-// Filter
 function filterTable() {
   const idInput = document.getElementById("idFilter").value.toLowerCase();
   const gradeInput = document.getElementById("gradeFilter").value.toLowerCase();
   const anomalyFilter = document.getElementById("anomalyFilter").value;
+  const userTypeFilter = document.getElementById("userTypeFilter").value;
   const rows = document.querySelectorAll("#studentTable tbody tr");
 
   rows.forEach(row => {
     const studentId = row.cells[0].textContent.toLowerCase();
     const grade = row.cells[2].textContent.toLowerCase();
     const hasAnomaly = row.dataset.hasanomaly === "true";
+    const userType = row.dataset.usertype.toLowerCase();
     let show = true;
+
     if (idInput && !studentId.includes(idInput)) show = false;
     if (gradeInput && !grade.includes(gradeInput)) show = false;
     if (anomalyFilter === "with" && !hasAnomaly) show = false;
     if (anomalyFilter === "without" && hasAnomaly) show = false;
+    if (userTypeFilter !== "all" && userType !== userTypeFilter) show = false;
+
     row.style.display = show ? "" : "none";
   });
 }
@@ -350,16 +368,12 @@ function openAnomalyModal(studentId, name, gradeSection) {
             <td>${a.details}</td>
             <td>${a.detected_at}</td>
             <td>${a.pc_tag}</td>
-            <td>
-              <button class="view-btn" style="background:#dc3545;">Delete</button>
-            </td>
+            <td><button class="view-btn" style="background:#dc3545;">Delete</button></td>
           `;
           tbody.appendChild(row);
-
-          // Pass the identifying fields to deleteAnomaly
           row.querySelector("button").addEventListener("click", () => {
             deleteAnomaly({
-                 id: a.id,
+              id: a.id,
               student_id: a.student_id,
               detected_at: a.detected_at,
               pc_tag: a.pc_tag
@@ -380,12 +394,11 @@ function deleteAnomaly(payload, row) {
   })
   .then(res => {
     if (res.ok) {
-        row.remove();
-        alert("Anomaly deleted successfully.");
-        closeAnomalyModal();  // optional: close modal
-        location.reload();    // reload students page to update counts
-    }
-    else alert("Failed to delete anomaly.");
+      row.remove();
+      alert("Anomaly deleted successfully.");
+      closeAnomalyModal();
+      location.reload();
+    } else alert("Failed to delete anomaly.");
   })
   .catch(err => { console.error(err); alert("Error deleting anomaly."); });
 }

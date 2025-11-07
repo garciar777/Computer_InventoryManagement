@@ -13,9 +13,18 @@ app = Flask(__name__)
 app.secret_key = "supersecretkey"
 DB_FILE = "database.db"
 
+
 # --- PASSWORD HASH ---
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def check_password(password, hashed_password):
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except ValueError:
+        return False
+
 
 # --- INIT DATABASE ---
 def init_db():
@@ -31,6 +40,26 @@ def init_db():
             )
         """)
 
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                        CREATE TABLE IF NOT EXISTS labs
+                        (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name TEXT NOT NULL UNIQUE
+                        )
+                        """)
+            conn.commit()
+
+            # Optional auto seed if empty
+            cur.execute("SELECT COUNT(*) FROM labs")
+            if cur.fetchone()[0] == 0:
+                cur.executemany("INSERT INTO labs (name) VALUES (?)", [
+                    ("ComLab 1",),
+                    ("ComLab 2",),
+                    ("ComLab 3",)
+                ])
+                conn.commit()
         # Student login table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS student_users (
@@ -62,6 +91,7 @@ def init_db():
                 id TEXT PRIMARY KEY,
                 name TEXT,
                 grade_section TEXT,
+                remarks TEXT,
                 password TEXT DEFAULT '',
                 status TEXT DEFAULT '',
                 deleted INTEGER DEFAULT 0
@@ -117,11 +147,12 @@ def init_db():
                 df = pd.read_excel("students.xlsx")  # Columns: 'Student ID', 'Name', 'Grade', 'Section'
                 cur = conn.cursor()
                 for _, row in df.iterrows():
-                    student_id = str(row.get('Student ID', '')).strip()
+                    student_id = str(row.get('Users ID', '')).strip()
                     name = str(row.get('Name', '')).strip()
                     grade = str(row.get('Grade', '')).strip() if not pd.isna(row.get('Grade', '')) else ""
                     section = str(row.get('Section', '')).strip() if not pd.isna(row.get('Section', '')) else ""
                     grade_section = f"{grade} - Section {section}".strip(" -")
+                    remarks = str(row.get('Remarks', '')).strip()
 
                     # preserve existing password/status if present
                     cur.execute("SELECT password, status FROM students WHERE id = ?", (student_id,))
@@ -130,9 +161,9 @@ def init_db():
                     existing_status = existing[1] if existing else ""
 
                     cur.execute("""
-                        INSERT OR REPLACE INTO students (id, name, grade_section, password, status)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (student_id, name, grade_section, existing_password, existing_status))
+                        INSERT OR REPLACE INTO students (id, name, grade_section, remarks,password, status)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (student_id, name, grade_section, remarks, existing_password, existing_status))
                 conn.commit()
                 print("✅ Students imported/updated from students.xlsx")
             except Exception as e:
@@ -140,18 +171,23 @@ def init_db():
         else:
             print("⚠️ No students.xlsx file found.")
 
+
 init_db()
 
-# --- CREATE DEFAULT ADMIN ---
-def create_admin(username="ICTO", password="ICTOadmin123"):
 
+# --- CREATE DEFAULT ADMIN ---
+def create_admin(username="admin", password="admin123"):
+    hashed_pw = hash_password(password)
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", (username, password))
+        conn.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", (username, hashed_pw))
         conn.commit()
+
+
 create_admin()
 
+
 def create_student(student_id, name, password, grade_section):
-    hashed_pw = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    hashed_pw = hash_password(password)
     with sqlite3.connect(DB_FILE) as conn:
         cur = conn.cursor()
         # Save hashed password for login
@@ -163,14 +199,16 @@ def create_student(student_id, name, password, grade_section):
         """, (student_id, name, grade_section, password))
         conn.commit()
 
+
 # --- INDEX / ROLE SELECTION ---
 @app.route('/')
 def index():
     options = [
-        {"id": 1, "name": "Student", "icon": "icons/students.png", "route": "/login/student"},
+        {"id": 1, "name": "User", "icon": "icons/students.png", "route": "/login/user"},
         {"id": 2, "name": "Admin", "icon": "icons/admin.png", "route": "/login/admin"},
     ]
     return render_template("index.html", options=options)
+
 
 # --- ADMIN LOGIN ---
 @app.route("/login/admin", methods=["GET", "POST"])
@@ -179,10 +217,11 @@ def login_admin():
         username = request.form["username"]
         password = request.form["password"]
         with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("SELECT * FROM admins WHERE username = ? AND password = ?", (username, password))
+            cur.execute("SELECT * FROM admins WHERE username = ?", (username,))
             admin = cur.fetchone()
-            if admin:
+            if admin and check_password(password, admin["password"]):
                 session["admin"] = username
                 flash("✅ Logged in successfully")
                 return redirect(url_for("dashboard"))
@@ -190,24 +229,25 @@ def login_admin():
                 flash("❌ Invalid username or password")
     return render_template("login_admin.html")
 
+
 # --- STUDENT LOGIN ---
-@app.route("/login/student", methods=["GET", "POST"])
+@app.route("/login/user", methods=["GET", "POST"])
 def login_student():
     if request.method == "POST":
         username = request.form["username"]
-        password = hash_password(request.form["password"])
+        password = request.form["password"]
         pc_tag = request.form.get("pc_tag") or request.args.get("pc_tag") or socket.gethostname()
 
         with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("SELECT * FROM student_users WHERE username = ? AND password = ?", (username, password))
+            cur.execute("SELECT * FROM student_users WHERE username = ?", (username,))
             student = cur.fetchone()
 
-        if student:
+        if student and check_password(password, student["password"]):
             session["student"] = username
             session["pc_tag"] = pc_tag
             flash("✅ Logged in successfully")
-
 
             hostname = socket.gethostname()
             with sqlite3.connect(DB_FILE) as conn:
@@ -241,6 +281,7 @@ def login_student():
 
     return render_template("login_student.html")
 
+
 # --- REGISTER ADMIN ---
 @app.route("/register_admin", methods=["GET", "POST"])
 def register_admin():
@@ -251,7 +292,7 @@ def register_admin():
         secret_code = request.form["secret_code"].strip()
 
         # ✅ SECURITY CHECK
-        ADMIN_SECRET = "ICTOAdminKey2025"  # Change this to something private!
+        ADMIN_SECRET = "SuperSecureAdminKey2025"  # Change this to something private!
 
         if secret_code != ADMIN_SECRET:
             flash("❌ Invalid admin secret code. Access denied.")
@@ -269,7 +310,8 @@ def register_admin():
                 flash("⚠️ Admin username already exists.")
                 return render_template("register_admin.html")
 
-            cur.execute("INSERT INTO admins (username, password) VALUES (?, ?)", (username, password))
+            hashed_pw = hash_password(password)
+            cur.execute("INSERT INTO admins (username, password) VALUES (?, ?)", (username, hashed_pw))
             conn.commit()
 
         flash("✅ Admin account created successfully.")
@@ -277,8 +319,10 @@ def register_admin():
 
     return render_template("register_admin.html")
 
+
 # --- REGISTER STUDENT ---
-@app.route("/register_student", methods=["GET", "POST"])
+# --- REGISTER STUDENT ---
+@app.route("/register_user", methods=["GET", "POST"])
 def register_student():
     if request.method == "POST":
         student_id = request.form["username"].strip()
@@ -314,13 +358,12 @@ def register_student():
             # 3️⃣ Register student (insert hashed password)
             hashed_pw = hash_password(password)
             cur.execute("INSERT INTO student_users (username, password) VALUES (?, ?)", (student_id, hashed_pw))
-
-            # Save plaintext password in the `students` table for admin viewing
+            hashed_password = hash_password(password)  # Hash the password
             cur.execute("""
                 UPDATE students 
-                SET password = ?, status = 'Registered'
+                SET password = ?, status = 'Registered', deleted = 0
                 WHERE id = ?
-            """, (password, student_id))
+            """, (hashed_password, student_id))  # Save the hashed password
 
             conn.commit()
 
@@ -328,6 +371,8 @@ def register_student():
         return redirect(url_for("login_student"))
 
     return render_template("register_student.html")
+
+
 @app.route("/student/dashboard")
 def student_dashboard():
     student_id = session.get("student")
@@ -366,6 +411,7 @@ def student_dashboard():
                            student={"id_number": student_id, "name": student_name},
                            anomalies=anomalies)
 
+
 # --- LOGOUT ---
 @app.route("/logout")
 def logout():
@@ -396,6 +442,8 @@ def logout():
     except Exception as e:
         print(f"⚠️ [logout] Error clearing session for {pc_tag}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/logout", methods=["GET"])
 def api_logout():
     pc_tag = session.get("pc_tag")
@@ -419,15 +467,19 @@ def api_logout():
         print(f"⚠️ [api_logout] Error clearing session for {pc_tag}: {e}")
         return jsonify({"error": str(e)}), 500
 
+
 # --- DASHBOARD ---
 @app.route("/dashboard")
 def dashboard():
-    comlabs = [
-        {"id": 1, "name": "ComLab 1", "icon": "icons/comlab.png"},
-        {"id": 2, "name": "ComLab 2", "icon": "icons/comlab.png"},
-        {"id": 3, "name": "ComLab 3", "icon": "icons/comlab.png"},
-    ]
-    return render_template("dashboard.html", comlabs=comlabs)
+    edit_mode = request.args.get("edit", "0") == "1"
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, name FROM labs ORDER BY id ASC")
+        labs = cur.fetchall()
+
+    return render_template("dashboard.html", labs=labs, edit_mode=edit_mode)
+
 
 @app.route("/api/verify_student", methods=["POST"])
 def verify_student():
@@ -444,10 +496,11 @@ def verify_student():
         cur.execute("SELECT password FROM student_users WHERE username = ?", (student_id,))
         pw_row = cur.fetchone()
 
-        if row and pw_row and pw_row[0] == hash_password(password):
+        if row and pw_row and check_password(password, pw_row[0]):
             return jsonify({"valid": True, "name": row[1]})
         else:
             return jsonify({"valid": False})
+
 
 @app.route("/comlab/<int:comlab_id>")
 def comlab_view(comlab_id):
@@ -456,6 +509,9 @@ def comlab_view(comlab_id):
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
+        cur.execute("SELECT name FROM labs WHERE id = ?", (comlab_id,))
+        row = cur.fetchone()
+        lab_name = row["name"] if row else f"ComLab {comlab_id}"
 
         # 🖥️ Fetch all devices under this comlab
         cur.execute("""
@@ -504,11 +560,14 @@ def comlab_view(comlab_id):
     return render_template(
         "comlab_view.html",
         comlab_id=comlab_id,
+        lab_name=lab_name,
         devices=devices,
         anomalies=anomalies,
         ai_alerts=ai_alerts,
         logged_in_student=logged_in_student
     )
+
+
 # --- STUDENT LOGIN EVENT (PC-based) ---
 @app.route("/api/student_login_event", methods=["POST"])
 def student_login_event():
@@ -549,6 +608,7 @@ def student_login_event():
     print(f"✅ {student_name} logged in on {pc_tag}")
     return jsonify({"success": True, "device_id": device_id})
 
+
 # --- STUDENT LOGOUT EVENT ---
 @app.route("/api/student_logout_event", methods=["POST"])
 def student_logout_event():
@@ -576,6 +636,7 @@ def student_logout_event():
 
     print(f"👋 Device {pc_tag} unassigned after logout.")
     return jsonify({"success": True})
+
 
 # --- Assign / Logout Student ---
 @app.route("/assign_student", methods=["POST"])
@@ -607,6 +668,7 @@ def assign_student():
 
     return jsonify({"success": True})
 
+
 @app.route("/generate_link", methods=["GET"])
 def generate_link():
     token = secrets.token_urlsafe(16)
@@ -619,20 +681,20 @@ def generate_link():
         )
         conn.commit()
 
+        # ---- GET LATEST COMLABS ----
+        comlabs = conn.execute("SELECT id, name FROM labs").fetchall()
+
     link = url_for("register_device", token=token, _external=True)
-    return render_template("link_generated.html", link=link)
+    return render_template("link_generated.html", link=link, comlabs=comlabs)
+
 
 # --- Register Device Page ---
 @app.route("/register_device/<token>", methods=["GET", "POST"])
 def register_device(token):
-    comlabs = [
-        {"id": 1, "name": "ComLab 1"},
-        {"id": 2, "name": "ComLab 2"},
-        {"id": 3, "name": "ComLab 3"},
-    ]
-
     with sqlite3.connect(DB_FILE) as conn:
         cur = conn.cursor()
+        cur.execute("SELECT id, name FROM labs")
+        comlabs = cur.fetchall()
         cur.execute("SELECT id, used FROM device_tokens WHERE token = ?", (token,))
         row = cur.fetchone()
 
@@ -673,6 +735,7 @@ def register_device(token):
             return render_template("success.html", tag=tag, hostname=hostname, ip=ip_addr)
 
     return render_template("register_device.html", comlabs=comlabs)
+
 
 @app.route("/api/log_anomaly", methods=["POST"])
 def api_log_anomaly():
@@ -733,6 +796,7 @@ def api_log_anomaly():
     print(f"Logged anomaly: device={device_id}, student={student_name}, type={anomaly_type}")
     return jsonify({"status": "logged"})
 
+
 @app.route("/comlab/<comlab_id>/anomalies")
 def view_reports(comlab_id):
     date_filter = request.args.get("date", "")
@@ -742,7 +806,9 @@ def view_reports(comlab_id):
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-
+        cur.execute("SELECT name FROM labs WHERE id = ?", (comlab_id,))
+        row = cur.fetchone()
+        lab_name = row["name"] if row else f"ComLab {comlab_id}"
         query = """
             SELECT a.id, a.device_id, a.student_id, a.student_name,
                    a.anomaly_type, a.details, a.detected_at,
@@ -777,10 +843,12 @@ def view_reports(comlab_id):
     return render_template(
         "view_reports.html",
         comlab_id=comlab_id,
+        lab_name=lab_name,
         anomalies=anomalies,
         devices=devices,
         anomaly_types=anomaly_types,
     )
+
 
 @app.route("/api/current_student", methods=["GET"])
 def current_student():
@@ -806,6 +874,7 @@ def current_student():
             "student_name": None
         })
 
+
 @app.route("/api/get_device_id")
 def get_device_id():
     pc_tag = request.args.get("pc_tag")
@@ -817,15 +886,20 @@ def get_device_id():
             return jsonify({"device_id": row[0]})
     return jsonify({"device_id": None})
 
+
 @app.route("/comlab/<int:comlab_id>")
 def anomalies_view(comlab_id):
     logged_in_student = session.get("student")  # get the logged-in student username, if any
 
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM labs WHERE id = ?", (comlab_id,))
+        row = cur.fetchone()
+        lab_name = row["name"] if row else f"ComLab {comlab_id}"
 
         devices_cursor = conn.execute("""
-            SELECT id, tag, assigned_student, used
+            SELECT id, tag,assigned_student, used
             FROM devices
             WHERE comlab_id = ?
         """, (comlab_id,))
@@ -838,15 +912,17 @@ def anomalies_view(comlab_id):
         else:
             device["assigned_student"] = logged_in_student if logged_in_student else None
 
+    return render_template("comlab_view.html", comlab_id=comlab_id, lab_name=lab_name, devices=devices)
 
-    return render_template("comlab_view.html", comlab_id=comlab_id, devices=devices)
 
 @app.route("/comlab/<int:comlab_id>/summary")
 def comlab_summary(comlab_id):
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-
+        cur.execute("SELECT name FROM labs WHERE id = ?", (comlab_id,))
+        row = cur.fetchone()
+        lab_name = row["name"] if row else f"ComLab {comlab_id}"
         # Count total devices in the comlab
         cur.execute("SELECT COUNT(*) AS total_devices FROM devices WHERE comlab_id = ?", (comlab_id,))
         total_devices = cur.fetchone()["total_devices"]
@@ -896,12 +972,14 @@ def comlab_summary(comlab_id):
         "summary.html",
         summary=summary,
         comlab_id=comlab_id,
+        lab_name=lab_name,
         total_devices=total_devices,
         total_anomalies=total_anomalies,
         students_with_anomalies=students_with_anomalies
     )
 
-@app.route("/students")
+
+@app.route("/users")
 def view_students():
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
@@ -909,7 +987,7 @@ def view_students():
 
         # Get all students
         cur.execute("""
-            SELECT s.id AS student_id, s.name AS student_name, s.grade_section
+            SELECT s.id AS student_id, s.name AS student_name, s.grade_section, s.remarks AS remarks
             FROM students s
             WHERE deleted = 0 or NULL
             ORDER BY s.name ASC
@@ -925,12 +1003,13 @@ def view_students():
               AND (a.cleared = 0 OR a.cleared IS NULL)
             AND (a.details NOT LIKE '%HIDClass%' OR a.details IS NULL)
             AND (a.details NOT LIKE '%USB Input Device ((Standard system devices))%' OR a.details IS NULL)
-            
+
             GROUP BY a.student_id
         """)
         anomaly_counts = {row["student_id"]: row["anomaly_count"] for row in cur.fetchall()}
 
         # Get passwords
+
         cur.execute("SELECT id AS student_id, password FROM students")
         passwords = {row["student_id"]: row["password"] for row in cur.fetchall()}
 
@@ -944,11 +1023,13 @@ def view_students():
             "student_name": s["student_name"],
             "grade_section": s["grade_section"] or "—",
             "password": password,
+            "remarks": s["remarks"],
             "has_anomaly": anomaly_count > 0,
             "anomaly_count": anomaly_count
         })
 
     return render_template("students.html", students=student_data)
+
 
 @app.route("/api/delete_anomaly", methods=["POST"])
 def delete_anomaly():
@@ -986,6 +1067,8 @@ def change_student_password(student_id):
 
     flash(f"🔑 Password changed for {student_id}")
     return redirect(url_for("view_students"))
+
+
 @app.route("/api/student_anomalies/<student_id>")
 def api_student_anomalies(student_id):
     with sqlite3.connect(DB_FILE) as conn:
@@ -1001,10 +1084,13 @@ def api_student_anomalies(student_id):
         """, (student_id,))
         anomalies = [dict(row) for row in cur.fetchall()]
     return jsonify(anomalies)
+
+
 def get_db_connection():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 @app.route("/api/deleted_anomalies")
 def deleted_anomalies():
@@ -1059,6 +1145,8 @@ def restore_anomaly():
     conn.close()
 
     return jsonify({"success": True})
+
+
 @app.route("/api/delete_device", methods=["POST"])
 def delete_device():
     data = request.get_json()
@@ -1085,6 +1173,8 @@ def delete_device():
     except Exception as e:
         print("Error deleting device:", e)
         return jsonify({"success": False, "message": str(e)}), 500
+
+
 @app.route("/delete_student/<student_id>", methods=["POST"])
 def delete_student(student_id):
     with sqlite3.connect(DB_FILE) as conn:
@@ -1093,7 +1183,9 @@ def delete_student(student_id):
         cur.execute("DELETE FROM student_users WHERE username = ?", (student_id,))
         conn.commit()
     flash(f"Student {student_id} has been deleted.", "success")
-    return redirect("/students")
+    return redirect(url_for("view_students"))
+
+
 @app.route("/admins")
 def view_admins():
     # Only allow access if logged in as an admin
@@ -1108,17 +1200,21 @@ def view_admins():
         admins = cur.fetchall()
 
     return render_template("admins.html", admins=admins)
+
+
 @app.route("/admins/<int:admin_id>/change_password", methods=["POST"])
 def change_admin_password(admin_id):
     new_password = request.form.get("new_password")
 
     with sqlite3.connect(DB_FILE) as conn:
         cur = conn.cursor()
-        cur.execute("UPDATE admins SET password = ? WHERE id = ?", (new_password, admin_id))
+        cur.execute("UPDATE admins SET password = ? WHERE id = ?", (hash_password(new_password), admin_id))
         conn.commit()
 
     flash("✅ Admin password updated successfully.")
     return redirect(url_for("view_admins"))
+
+
 @app.route("/delete_admin/<int:admin_id>")
 def delete_admin(admin_id):
     with sqlite3.connect(DB_FILE) as conn:
@@ -1128,6 +1224,70 @@ def delete_admin(admin_id):
 
     flash("✅ Admin removed successfully.")
     return redirect(url_for("view_admins"))
+
+
+@app.route("/delete_allstudent", methods=["POST"])
+def delete_allstudent():
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE students SET deleted = 1")
+        conn.commit()
+
+    flash("✅ All students marked as deleted successfully.")
+    return redirect(url_for("view_students"))
+
+
+@app.route("/add_lab", methods=["POST"])
+def add_lab():
+    data = request.get_json()
+    lab_name = data.get("lab_name", "").strip()
+
+    if lab_name == "":
+        return jsonify({"message": "Lab name cannot be empty."}), 400
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+
+        # Check if existing
+        cur.execute("SELECT name FROM labs WHERE LOWER(name) = LOWER(?)", (lab_name,))
+        exists = cur.fetchone()
+        if exists:
+            return jsonify({"message": "Lab already exists!"}), 400
+
+        cur.execute("INSERT INTO labs (name) VALUES (?)", (lab_name,))
+        conn.commit()
+
+    return jsonify({"message": f"{lab_name} added successfully!"})
+
+
+@app.route("/rename_lab", methods=["POST"])
+def rename_lab():
+    data = request.get_json()
+    lab_id = data.get("id")
+    new_name = data.get("new_name").strip()
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE labs SET name = ? WHERE id = ?", (new_name, lab_id))
+        conn.commit()
+
+    return jsonify({"message": "Lab renamed successfully!"})
+
+
+@app.route("/remove_lab", methods=["POST"])
+def remove_lab():
+    data = request.get_json()
+    lab_id = data.get("id")
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM labs WHERE id = ?", (lab_id,))
+        cur.execute("DELETE FROM devices WHERE comlab_id = ?", (lab_id,))
+
+        conn.commit()
+
+    return jsonify({"message": "Lab removed successfully!"})
+
 
 if __name__ == "__main__":
     init_db()  # ensure tables exist
